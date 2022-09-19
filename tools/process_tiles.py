@@ -3,6 +3,8 @@
 from PIL import Image, ImageDraw
 from collections.abc import Callable
 from sys import argv
+from typing import TypedDict
+import json
 
 TSIZE = 32
 CROP_PAD = TSIZE * 2
@@ -11,6 +13,15 @@ COLORS = ['red', 'blue', 'green', 'yellow']
 Box = tuple[int, int, int, int]  # (left, top, right, bottom)
 Point = tuple[int, int]  # (x, y)
 WaterTest = Callable[[Point], bool]
+
+
+class Tile(TypedDict):
+  name: str
+  color: str
+  background: bool
+  srcx: int
+  srcy: int
+  bbox: Box | None
 
 
 class Islands:
@@ -23,20 +34,19 @@ class Islands:
     self.moves = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 
   def find(self) -> list[Box]:
-    n = 0
     islands = []
-    for x in range(self.w):
-      for y in range(self.h):
+    for y in range(self.h):
+      for x in range(self.w):
         p = (x, y)
         if p in self.visited:
           continue
         if self.is_water(p):
           self.visited.add(p)
           continue
-        n += 1
-        print('Found island %03d' % n, end=' ')
         box = self.__explore_island(p)
         islands.append(box)
+        print('Found island %03d size: [%3d x %3d]' %
+              (len(islands), *get_size(box)))
     return islands
 
   def __explore_island(self, start: Point) -> Box:
@@ -52,19 +62,24 @@ class Islands:
       self.visited.add(p)
       if not self.is_water(p):
         land.append(p)
-        for x0, y0 in self.moves:
-          stack.append((x + x0, y + y0))
+        for dx, dy in self.moves:
+          stack.append((x + dx, y + dy))
+    return find_box(land)
 
-    # Find box
-    l, r = self.w, 0
-    t, b = self.h, 0
-    for x, y in land:
-      l, r = min(l, x), max(r, x)
-      t, b = min(t, y), max(b, y)
 
-    size = (r - l + 1, b - t + 1)
-    print('size: [%3d x %3d]' % size)
-    return (l, t, r, b)
+def get_size(box: Box) -> Point:
+  l, t, r, b = box
+  return (r - l + 1, b - t + 1)
+
+
+def find_box(points: list[Point]) -> Box:
+  x, y = points[0]
+  l = r = x
+  t = b = y
+  for x, y in points:
+    l, r = min(l, x), max(r, x)
+    t, b = min(t, y), max(b, y)
+  return (l, t, r, b)
 
 
 # [x] Find all islands
@@ -73,28 +88,27 @@ class Islands:
 # [x]   If width is not a factor of TSIZE, ask if right or left aligned
 # [x]   If height is not a factor of TSIZE, ask if top or bottom aligned
 # [x]       Draw colored squares (RGBY) with numbers and ask which square is correct
-# [ ]   If width or height are larger than TSIZE, split into separate tiles
-# [ ]   For each tile
+# [x]   If width or height are larger than TSIZE, split into separate tiles
+# [x]   For each tile
 # [x]       Prompt for name
-# [ ]       Add to a master tile list
+# [x]       Add to a primary tile list
 # [ ] Output all tile data (name, srcx, srcy, bbox)
 
-# Consider making a new master image with no blank spaces,
+# Consider making a new primary image with no blank spaces,
 #   Allowing a single index value for lookup
 
 
 def outline(im: Image.Image, subj: Box, color: str):
   l, t, r, b = subj
   box = (l - 1, t - 1, r + 1, b + 1)
-  draw = ImageDraw.Draw(im)
-  draw.rectangle(box, outline=color)
+  ImageDraw.Draw(im).rectangle(box, outline=color)
 
 
 def mod(box: Box, delta: Box) -> Box:
   return tuple([a + b for a, b in zip(box, delta)])
 
 
-def process(im: Image.Image, orig: Box):
+def process(im: Image.Image, orig: Box, all: list[Tile]):
   w, h = im.size
   crop_box = (
       max(0, orig[0] - CROP_PAD),
@@ -108,6 +122,7 @@ def process(im: Image.Image, orig: Box):
       orig[2] - crop_box[0],
       orig[3] - crop_box[1],
   )
+  crop = im.crop(crop_box)
 
   alts = []
   subj_w = subj[2] - subj[0] + 1
@@ -125,7 +140,6 @@ def process(im: Image.Image, orig: Box):
     ]
 
   if alts:
-    crop = im.crop(crop_box)
     opts = ''
     for alt, color in zip(alts, COLORS):
       outline(crop, alt, color)
@@ -135,11 +149,30 @@ def process(im: Image.Image, orig: Box):
     while choice not in opts:
       choice = input(f'Which box is correct? [{opts}] ')
     subj = alts[opts.index(choice)]
+  else:
+    outline(crop, subj, COLORS[0])
+    crop.show()
 
-  crop = im.crop(crop_box)
-  outline(crop, subj, COLORS[0])
-  crop.show()
-  input('Tile name: ')
+  # TODO: dedup names
+  name = input('Tile name: ')
+  color = input('Color: ')
+  background = input('Background? [y/N] ')
+  tiles = []
+  for y in range(subj[1], subj[3], TSIZE):
+    for x in range(subj[0], subj[2], TSIZE):
+      tiles.append({
+          'name': '_'.join(name.split()),
+          'color': color,
+          'background': background in 'yY',
+          'srcx': orig[0] + x - subj[0],
+          'srcy': orig[1] + y - subj[1],
+      })
+  if len(tiles) == 1:
+    all.append(tiles[0])
+  else:
+    for i, tile in enumerate(tiles):
+      tile['name'] += f'_{i}'
+    all.extend(tiles)
 
 
 if __name__ == '__main__':
@@ -150,5 +183,7 @@ if __name__ == '__main__':
   def is_blank(p: Point) -> bool:
     return px[p][-1] == 0  # type: ignore
 
+  tiles = []
   for island in Islands(*im.size, is_blank).find():
-    process(im, island)
+    process(im, island, tiles)
+    print('\nAll tiles:\n', json.dumps(tiles))
